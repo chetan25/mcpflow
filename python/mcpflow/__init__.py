@@ -19,7 +19,7 @@ from .registry import ToolRegistry
 from .server import MCPServer, tool, MCPServerDecorator
 from .tracing import Tracer
 from .types import MCPRequest, MCPResponse, ToolDefinition
-from .http_bridge import HTTPBridge
+from .http_bridge import MCPHTTPBridge
 from .testing import MockServer, create_test_server
 
 # Define public API
@@ -37,7 +37,7 @@ __all__ = [
     # Registry
     "ToolRegistry",
     # HTTP
-    "HTTPBridge",
+    "MCPHTTPBridge",
     # Observability
     "Tracer",
     # Testing
