@@ -309,12 +309,6 @@ MCPFlow is licensed under the MIT License - see the [LICENSE](LICENSE) file for 
 
 MCPFlow is built on the Model Context Protocol specification and inspired by the broader AI and open-source communities.
 
-## 📞 Support & Community
-
-- **GitHub Issues**: [Report bugs and request features](https://github.com/mcpflow/mcpflow/issues)
-- **GitHub Discussions**: [Ask questions and share ideas](https://github.com/mcpflow/mcpflow/discussions)
-- **Documentation**: [Read the full docs](docs/)
-
 ## 🗺️ Roadmap
 
 Future versions of MCPFlow will include:
@@ -325,7 +319,3 @@ Future versions of MCPFlow will include:
 - Multi-agent collaboration
 - Enhanced error recovery
 - Performance optimization
-
----
-
-**Made with ❤️ by the MCPFlow community**
