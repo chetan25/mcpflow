@@ -7,6 +7,7 @@ from .streaming import StreamingToolExecutor, ProgressNotification, StreamChunk
 from .http_transport import HTTPBridgeServer, StreamableHTTPTransport
 from .declarative_discovery import DeclarativeDiscovery
 from .policy import PolicyFile, PolicyEnforcer, ToolPolicy
+from .interceptor import InterceptorProtocol, DefaultInterceptor, CompositeInterceptor
 
 __all__ = [
     "WebMCPBridge",
@@ -17,6 +18,9 @@ __all__ = [
     "PolicyFile",
     "PolicyEnforcer",
     "ToolPolicy",
+    "InterceptorProtocol",
+    "DefaultInterceptor",
+    "CompositeInterceptor",
     "WebMCPTool",
     "WebMCPManifest",
     "SessionProfile",
