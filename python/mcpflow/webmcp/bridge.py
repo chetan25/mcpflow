@@ -112,6 +112,19 @@ class WebMCPBridge:
         """Clean up resources."""
         await self.browser.close()
 
+    def get_streaming_executor(self):
+        """
+        Get access to the streaming executor for advanced use.
+
+        Returns:
+            StreamingToolExecutor instance
+        """
+        from .streaming import StreamingToolExecutor
+
+        if not hasattr(self, "_streaming"):
+            self._streaming = StreamingToolExecutor(self)
+        return self._streaming
+
     async def __aenter__(self):
         """Async context manager entry."""
         return self

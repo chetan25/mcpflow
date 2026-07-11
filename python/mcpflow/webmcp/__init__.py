@@ -1,8 +1,9 @@
-"""WebMCP bridge package for MCPFlow."""
+"""WebMCP bridge module exports."""
 
+from .types import WebMCPTool, WebMCPManifest, SessionProfile, SecurityPolicy
 from .bridge import WebMCPBridge
 from .server_facade import WebMCPServer
-from .types import WebMCPTool, WebMCPManifest, SessionProfile, SecurityPolicy
+from .streaming import StreamingToolExecutor, ProgressNotification, StreamChunk
 
 __all__ = [
     "WebMCPBridge",
@@ -11,4 +12,7 @@ __all__ = [
     "WebMCPManifest",
     "SessionProfile",
     "SecurityPolicy",
+    "StreamingToolExecutor",
+    "ProgressNotification",
+    "StreamChunk",
 ]
