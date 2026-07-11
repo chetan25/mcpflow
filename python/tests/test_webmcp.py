@@ -162,9 +162,13 @@ class TestWebMCPManifest:
 @pytest.mark.asyncio
 async def test_browser_controller_context_manager():
     """Test browser controller as async context manager."""
-    from mcpflow.webmcp.browser import BrowserController
+    try:
+        from mcpflow.webmcp.browser import BrowserController
 
-    # Mock Playwright to avoid actually launching browser
-    with patch("mcpflow.webmcp.browser.async_playwright"):
-        controller = BrowserController(headless=True)
-        # In real test, would initialize and clean up
+        # Mock Playwright to avoid actually launching browser
+        with patch("playwright.async_api.async_playwright"):
+            controller = BrowserController(headless=True)
+            assert controller.headless is True
+            assert controller.timeout == 30000
+    except ImportError:
+        pytest.skip("Playwright not installed (optional dependency)")
