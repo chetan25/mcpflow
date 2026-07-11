@@ -592,6 +592,77 @@ def deploy(
         click.echo("\n✅ Deployment initiated!")
 
 
+@mcpflow_cli.group()
+@click.pass_context
+def webmcp(ctx: click.Context) -> None:
+    """WebMCP bridge commands for discovering and exposing WebMCP tools."""
+    pass
+
+
+@webmcp.command()
+@click.argument("url")
+@click.option("--origins", multiple=True, help="Allowed origins (comma-separated)")
+@click.option("--origin-slug", help="Short identifier for origin (defaults to domain)")
+@click.pass_context
+def discover(ctx: click.Context, url: str, origins: tuple, origin_slug: Optional[str]) -> None:
+    """Discover WebMCP tools on a page."""
+    import asyncio
+    from .webmcp import WebMCPBridge
+
+    allowed_origins = list(origins) if origins else [url]
+
+    async def run():
+        async with WebMCPBridge(headless=True, origins_allowlist=allowed_origins) as bridge:
+            click.echo(f"🔍 Discovering tools on {url}...")
+            manifest = await bridge.discover(url, origin_slug=origin_slug)
+
+            if manifest:
+                click.echo(f"✅ Found {len(manifest.tools)} tools:")
+                for tool in manifest.tools:
+                    click.echo(f"  • {tool.name}: {tool.description}")
+                click.echo(f"\n📋 Manifest: {json.dumps(manifest.model_dump(), default=str, indent=2)}")
+            else:
+                click.echo("❌ No tools found or discovery failed")
+
+    asyncio.run(run())
+
+
+@webmcp.command()
+@click.argument("url")
+@click.option("--origins", multiple=True, help="Allowed origins")
+@click.option("--origin-slug", help="Short identifier for origin")
+@click.option("--headless/--headed", default=True, help="Run browser headless or visible")
+@click.pass_context
+def bridge(ctx: click.Context, url: str, origins: tuple, origin_slug: Optional[str], headless: bool) -> None:
+    """Run WebMCP bridge as MCP server (stdio transport for Claude Desktop)."""
+    import asyncio
+    from .webmcp import WebMCPBridge, WebMCPServer
+
+    allowed_origins = list(origins) if origins else [url]
+
+    async def run():
+        slug = origin_slug or url.replace("https://", "").replace("http://", "").replace(".", "_")
+        click.echo(f"🌉 WebMCP Bridge starting for {url}", err=True)
+
+        async with WebMCPBridge(headless=headless, origins_allowlist=allowed_origins) as webmcp_bridge:
+            click.echo(f"🔍 Discovering tools...", err=True)
+            manifest = await webmcp_bridge.discover(url, origin_slug=slug)
+
+            if not manifest or not manifest.tools:
+                click.echo(f"❌ No tools found on {url}", err=True)
+                raise SystemExit(1)
+
+            click.echo(f"✅ Discovered {len(manifest.tools)} tools", err=True)
+
+            # Run MCP server
+            server = WebMCPServer(webmcp_bridge, slug)
+            await server.initialize()
+            click.echo(f"✅ MCP server ready (origin: {slug})", err=True)
+            await server.run()
+
+    asyncio.run(run())
+
+
 @mcpflow_cli.command()
 @click.pass_context
 def version(ctx: click.Context) -> None:
