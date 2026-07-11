@@ -28,6 +28,43 @@ MCPFlow simplifies the complexity of working with MCP servers by providing:
 - **Configuration Management**: YAML-based configuration with environment variable support
 - **Distributed Tracing**: OpenTelemetry OTLP exporter integration
 
+### WebMCP Bridge (Experimental)
+
+Expose WebMCP tools (currently Gemini-only in Chrome) as standard MCP servers that work with Claude Desktop, Cursor, and any MCP client:
+
+- **Discovery**: Automatically find WebMCP tools on live pages
+- **Bridging**: Re-expose tools as a standard MCP server (stdio transport)
+- **Security**: Origin allowlist, description sanitization, audit logging
+- **CLI Tools**: `mcpflow webmcp discover` and `mcpflow webmcp bridge` commands
+
+#### Quick Start (WebMCP)
+
+```bash
+# Install with WebMCP support (requires Chrome 149+)
+pip install mcpflow[webmcp]
+
+# Discover tools on a page
+mcpflow webmcp discover https://shop.example.com
+
+# Run as MCP server for Claude Desktop / Cursor
+mcpflow webmcp bridge https://shop.example.com
+```
+
+#### Claude Desktop Configuration
+
+After running the bridge, add to `~/.config/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "webmcp-shop": {
+      "command": "mcpflow",
+      "args": ["webmcp", "bridge", "https://shop.example.com"]
+    }
+  }
+}
+```
+
 ### Developer Experience
 
 - **CLI Tools**: `mcpflow` command for project initialization and management
@@ -114,7 +151,15 @@ mcpflow/
 │   │   ├── tracing.py          # OpenTelemetry integration
 │   │   ├── cli.py              # Command-line interface
 │   │   ├── testing.py          # Testing utilities
-│   │   └── types.py            # Type definitions
+│   │   ├── types.py            # Type definitions
+│   │   └── webmcp/             # WebMCP bridge (experimental)
+│   │       ├── bridge.py       # WebMCPBridge orchestrator
+│   │       ├── browser.py      # Browser control (Playwright)
+│   │       ├── discovery.py    # Tool discovery logic
+│   │       ├── translator.py   # Schema translation
+│   │       ├── security.py     # Security layer
+│   │       ├── server_facade.py# MCP server facade
+│   │       └── types.py        # WebMCP types
 │   ├── tests/                  # Test suite
 │   └── pyproject.toml          # Project configuration
 ├── docs/                       # Documentation
