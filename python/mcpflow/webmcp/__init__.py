@@ -8,6 +8,7 @@ from .http_transport import HTTPBridgeServer, StreamableHTTPTransport
 from .declarative_discovery import DeclarativeDiscovery
 from .policy import PolicyFile, PolicyEnforcer, ToolPolicy
 from .interceptor import InterceptorProtocol, DefaultInterceptor, CompositeInterceptor
+from .multi_origin import OriginConfig, MultiOriginConfig, create_default_multi_origin_config
 
 __all__ = [
     "WebMCPBridge",
@@ -21,6 +22,9 @@ __all__ = [
     "InterceptorProtocol",
     "DefaultInterceptor",
     "CompositeInterceptor",
+    "OriginConfig",
+    "MultiOriginConfig",
+    "create_default_multi_origin_config",
     "WebMCPTool",
     "WebMCPManifest",
     "SessionProfile",
