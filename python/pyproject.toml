@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcpflow"
-version = "0.1.0"
-description = "Model Context Protocol (MCP) flow orchestration and management framework"
+version = "1.0.0"
+description = "Model Context Protocol (MCP) flow orchestration and management framework with WebMCP bridge"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "MCPFlow Contributors", email = "contributors@mcpflow.dev"}

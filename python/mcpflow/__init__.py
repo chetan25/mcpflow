@@ -9,7 +9,7 @@ Model Context Protocol (MCP) connections with support for:
 - Configuration management
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 __author__ = "MCPFlow Contributors"
 __license__ = "MIT"
 
