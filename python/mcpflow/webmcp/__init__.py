@@ -9,6 +9,13 @@ from .declarative_discovery import DeclarativeDiscovery
 from .policy import PolicyFile, PolicyEnforcer, ToolPolicy
 from .interceptor import InterceptorProtocol, DefaultInterceptor, CompositeInterceptor
 from .multi_origin import OriginConfig, MultiOriginConfig, create_default_multi_origin_config
+from .result_diffing import (
+    ResultDiffer,
+    DOMCapture,
+    PropertyDelta,
+    StateDiff,
+    DeltaType,
+)
 
 __all__ = [
     "WebMCPBridge",
@@ -25,6 +32,11 @@ __all__ = [
     "OriginConfig",
     "MultiOriginConfig",
     "create_default_multi_origin_config",
+    "ResultDiffer",
+    "DOMCapture",
+    "PropertyDelta",
+    "StateDiff",
+    "DeltaType",
     "WebMCPTool",
     "WebMCPManifest",
     "SessionProfile",
