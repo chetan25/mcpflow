@@ -8,6 +8,7 @@ from .browser import BrowserController
 from .discovery import ToolDiscovery
 from .translator import SchemaTranslator
 from .security import SecurityManager
+from .session import SessionProfileManager, EncryptedSessionStore
 from .types import WebMCPManifest
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ class WebMCPBridge:
         self.discovery = ToolDiscovery(self.browser)
         self.translator = SchemaTranslator()
         self.security = SecurityManager(audit_dir=audit_dir)
+        self.session_manager = SessionProfileManager(store=EncryptedSessionStore())
         self.manifests = {}  # origin -> WebMCPManifest
 
         if origins_allowlist:
