@@ -125,6 +125,22 @@ class WebMCPBridge:
             self._streaming = StreamingToolExecutor(self)
         return self._streaming
 
+    def get_http_server(self, host: str = "127.0.0.1", port: int = 8000, use_sse: bool = True):
+        """
+        Get an HTTP server for remote access to the bridge.
+
+        Args:
+            host: Server host
+            port: Server port
+            use_sse: Enable Server-Sent Events streaming
+
+        Returns:
+            HTTPBridgeServer instance
+        """
+        from .http_transport import HTTPBridgeServer
+
+        return HTTPBridgeServer(self, host=host, port=port, use_sse=use_sse)
+
     async def __aenter__(self):
         """Async context manager entry."""
         return self
