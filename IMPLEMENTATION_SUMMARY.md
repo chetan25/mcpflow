@@ -21,6 +21,48 @@
 > WebMCP page and a real MCP client is still pending** — do not treat this
 > document as proof that it works until that verification pass has run.
 
+> **Update (2026-07-18, later same day):** closed the remaining spec gaps
+> that were previously interfaces without callers:
+> - **Human-in-the-loop confirmation gate** (spec 3.6.4) — destructive tools
+>   flagged by a policy file now go through real MCP elicitation
+>   (`session.elicit_form()`, verified against the actual installed `mcp`
+>   SDK API) before executing, and fail closed if the client doesn't support
+>   elicitation or declines.
+> - **Cross-origin chain guard** (spec 3.6.6) — `WebMCPBridge` now tracks
+>   recent tool results per origin and calls `interceptor.cross_origin_check()`
+>   when a new call's arguments match a value returned by a *different*
+>   origin's prior result. This is exact-value matching, not full taint
+>   tracking.
+> - **Result diffing wired up** — `bridge.call_tool()` captures real
+>   before/after page state via a new `BrowserController.capture_page_json()`
+>   and attaches a diff to `ToolCallResult` when `enable_result_diffing=True`.
+> - **Declarative-tier tools can now actually be invoked** — form-based
+>   tools get filled and submitted (`BrowserController.submit_form()`);
+>   JSON-LD Actions with an EntryPoint get fetched in-page
+>   (`call_json_ld_entrypoint()`, session cookies apply automatically);
+>   llms.txt tools and EntryPoint-less Actions are correctly reported as
+>   uncallable rather than silently attempting an imperative call.
+> - **Multi-tab/multi-origin concurrency** — each origin now gets its own
+>   Playwright context+page (`BrowserController.get_page_for_origin()`), so
+>   concurrent tool calls across different origins run in parallel instead
+>   of serializing through one shared page.
+> - **Truss integration example** — `examples/05-truss-interceptor/` is a
+>   runnable demo of a production-shaped `InterceptorProtocol`
+>   implementation gating real tool calls.
+> - **Streamable HTTP transport verified against a real ASGI client** — and
+>   this caught a real bug: `HTTPBridgeServer` registered a `/discover`
+>   handler that had **no matching FastAPI route at all**, making it
+>   completely unreachable over HTTP despite being "registered." Fixed, plus
+>   `origin_slug` was being silently dropped from discovery requests.
+>
+> Also found and fixed while writing real end-to-end tests for the above
+> (previously masked because nothing exercised these paths for real):
+> `prepare_discovery()`/`navigate()` ordering, `SecurityManager.log_tool_call()`
+> missing a `metadata` kwarg, `discover_from_llms_txt` concatenating
+> `/llms.txt` onto a full page path instead of the site root (and not
+> guarding against non-HTTP schemes), and result diffing missing DOM
+> mutations because `include_html` defaulted to off.
+
 ---
 
 ## What Was Built
@@ -229,18 +271,25 @@ origins:
     audit logging: implemented
   - InterceptorProtocol is now actually wired into `WebMCPBridge.call_tool()`
     (previously the default interceptor called methods that didn't exist)
-  - Cross-origin chain guard exists as an interface but nothing in the call
-    path invokes `cross_origin_check` yet
+  - Cross-origin chain guard now invokes `cross_origin_check` for real
+    (heuristic exact-value matching against recent results, not full taint
+    tracking)
+  - Human-in-the-loop confirmation gate now uses real MCP elicitation,
+    verified against the installed `mcp` SDK's `elicit_form()` API, and
+    fails closed if unsupported/declined
 
 - 🟡 **Performance**
   - Manifest caching with TTL + content hashing now implemented (`cache.py`)
     and wired into `discover()`
   - Streaming now wraps a real tool call instead of a fake progress loop
-  - Multi-tab parallelism: not implemented (correctly deferred to Phase 3)
+  - Multi-tab/multi-origin concurrency implemented: each origin gets its own
+    browser context+page via `get_page_for_origin()`
 
 - 🟡 **Deployment**
   - Stdio transport now uses the real official SDK API
-  - HTTP transport with SSE exists but has not been run against a real client
+  - HTTP transport with SSE verified against a real ASGI client (`httpx.ASGITransport`);
+    this caught and fixed a missing `/discover` route that was completely
+    unreachable over HTTP
   - Docker: not implemented
 
 - ✅ **Documentation**
@@ -408,9 +457,11 @@ mcpflow/
 
 - **Chrome 149+ required** — Origin trial, full support Q4 2026
 - **headless-only by default** — Headed mode for sensitive operations (config option)
-- **Single-tab contexts** — Multi-tab concurrency (Phase 3)
-- **Provider adapters** — Currently Anthropic-focused (Phase 3, plugin model ready)
-- **Recorder** — Composite tools from recorded sessions (Phase 3)
+- **Provider-agnostic LLM integration implemented** (`mcpflow/providers/`) — `OpenAICompatibleProvider`
+  (zero-dep, covers OpenRouter/Ollama/Groq/Together) and optional `LiteLLMProvider`; not yet
+  verified against a real API key/network call, only mocked transports
+- **Recorder** — Composite tools from recorded sessions (Phase 3, not started)
+- **Docker image, demo site** — not started
 
 ---
 
@@ -450,39 +501,43 @@ mcpflow webmcp discover https://shop.example.com
 
 ## Metrics
 
-- **Codebase:** ~3,500 lines (webmcp module)
-- **Tests:** 75+ new tests (Phase 2+), 308 total
-- **Coverage:** 90%+ (webmcp module)
-- **Build Size:** 24KB wheel + 50KB sdist
-- **Dependencies:** 7 core, 8 optional
-- **Documentation:** 377-line guide + release docs
-- **Git Commits:** 12 (clean, semantic messages)
+- **Tests:** 343 passing (webmcp + core + providers + e2e), stable across
+  repeated runs; excludes one unrelated pre-existing failure (`test_init.py`,
+  a stale test against a legacy core API)
+- **E2E coverage:** 9 tests drive a real Chromium instance (via Playwright)
+  against local HTML fixtures — real tool invocation, multi-origin
+  concurrency, declarative form invocation, result diffing, and the
+  Streamable HTTP transport against a real ASGI client
+- **Git Commits:** see `git log` for the actual history; commit messages
+  describe what changed and why, not phase-completion claims
 
 ---
 
 ## Timeline
 
-- **Phase 1 (MVP):** Scaffolded ✅ / Real tool invocation ✅ (2026-07-18) / End-to-end verified ❌
+- **Phase 1 (MVP):** Scaffolded ✅ / Real tool invocation ✅ / End-to-end verified ✅ (2026-07-18, real Chromium + HTML fixtures)
 - **Phase 2 (Hardening, 2.1–2.6):** Scaffolded ✅ / Wired into the real call path ✅ (2026-07-18)
-- **Post-Phase-2 (Multi-origin, diffing):** Scaffolded ✅ / Multi-origin wired into CLI + `require_headed_for` enforced ✅ (2026-07-18)
+- **Post-Phase-2 (Multi-origin, diffing, multi-tab, security gates):** Scaffolded ✅ / Fully wired and e2e-verified ✅ (2026-07-18)
 - **PyPI Setup:** Metadata + CI workflow exist; **no tag ever pushed, nothing published**
-- **Phase 3 (Recorder, adapters, Docker):** Designed, pending
-- **Registry submission:** Pending PyPI publication, which is pending end-to-end verification
+- **Phase 3 (Recorder, Docker, demo site):** Designed, pending
+- **LLM provider integration (ChatManager):** Implemented, provider-agnostic (`mcpflow/providers/`); not yet verified against a real API key/network call
+- **Registry submission:** Pending PyPI publication
 
 ---
 
 ## Conclusion
 
-The WebMCP bridge's core invocation path — discover tools on a page, resolve
-a tool call, and execute it for real against `navigator.modelContext` — is
-now implemented, along with the integration wiring (interceptor, policy,
-session profiles, manifest cache, `MCPRegistry.register_webmcp()`) that was
-previously scaffolded but disconnected. **It has not yet been verified
-end-to-end** against a live WebMCP page and a real MCP client, and it has not
-been published anywhere.
+The WebMCP bridge's core invocation path, security gates (confirmation,
+cross-origin, policy), result diffing, declarative-tier invocation, and
+multi-origin concurrency are implemented and verified end-to-end against a
+real Chromium instance and real HTML fixtures — not just unit-mocked
+collaborators. The Streamable HTTP transport is verified against a real ASGI
+client. It has not been published anywhere.
 
 **Not ready for:** PyPI publication, production deployment, or MCP registry
-submission, until the end-to-end verification pass below has been run.
+submission, until verified against a real WebMCP-enabled site (Chrome 149+
+origin trial) and a real MCP client (Claude Desktop/Cursor), not just local
+fixtures.
 
 ---
 

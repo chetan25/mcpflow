@@ -27,6 +27,7 @@ class WebMCPBridge:
         policy_file: Optional[str] = None,
         cache_ttl_seconds: int = 3600,
         multi_origin_config: Optional[Any] = None,
+        enable_result_diffing: bool = False,
     ):
         """
         Initialize WebMCP bridge.
@@ -47,6 +48,9 @@ class WebMCPBridge:
             multi_origin_config: Optional `MultiOriginConfig` used to look up
                 per-origin `require_headed_for` tool patterns before invoking
                 a tool (see call_tool()).
+            enable_result_diffing: Capture page state before/after each real
+                tool call and attach a before/after diff to ToolCallResult.
+                Off by default since it costs an extra page snapshot per call.
         """
         self.browser = BrowserController(headless=headless)
         self.discovery = ToolDiscovery(self.browser)
@@ -58,6 +62,9 @@ class WebMCPBridge:
         self.manifests = {}  # origin -> WebMCPManifest
         self._origin_urls = {}  # origin_slug -> last-discovered full URL
         self._tools_changed_listeners: list[Callable[[str, WebMCPManifest], None]] = []
+        self._recent_results: list = []  # (origin_slug, result) - for cross-origin chain guard
+        self._recent_results_limit = 20
+        self.enable_result_diffing = enable_result_diffing
 
         self.policy_enforcer = None
         if policy_file:
@@ -125,13 +132,15 @@ class WebMCPBridge:
             logger.error(f"Origin not allowed: {url}")
             return None
 
-        # Initialize browser if needed
-        if not self.browser.browser:
-            await self.browser.initialize()
+        # Each origin gets its own dedicated page/context so concurrent tool
+        # calls across different origins can run in parallel rather than
+        # serializing through one shared page (spec section 5, multi-tab
+        # parallelism).
+        page = await self.browser.get_page_for_origin(origin_slug)
 
         if session_profile:
             applied = await self.session_manager.apply_profile_to_context(
-                session_profile, self.browser.context
+                session_profile, page.context
             )
             if not applied:
                 logger.warning(
@@ -140,7 +149,9 @@ class WebMCPBridge:
 
         # Discover tools
         prior_manifest = self.manifests.get(origin_slug)
-        manifest = await self.discovery.discover_tools(url, origin_slug, fallback=fallback)
+        manifest = await self.discovery.discover_tools(
+            url, origin_slug, fallback=fallback, page=page
+        )
 
         if manifest:
             # Sanitize tool descriptions
@@ -248,6 +259,112 @@ class WebMCPBridge:
 
         return None
 
+    @staticmethod
+    def _flatten_leaf_values(obj) -> list:
+        """Flatten a nested dict/list into its scalar leaf values.
+
+        Used by the cross-origin chain guard as a lightweight heuristic for
+        detecting when data from one origin's tool result is being passed
+        into a call on another origin - the exfiltration path the guard
+        exists for (spec section 3.6.6). This is exact-value matching, not
+        full taint tracking; it catches the common case of an agent copying
+        a returned value straight into a follow-up call.
+        """
+        values = []
+        if isinstance(obj, dict):
+            for v in obj.values():
+                values.extend(WebMCPBridge._flatten_leaf_values(v))
+        elif isinstance(obj, list):
+            for v in obj:
+                values.extend(WebMCPBridge._flatten_leaf_values(v))
+        elif isinstance(obj, (str, int, float)) and obj != "":
+            values.append(obj)
+        return values
+
+    def _detect_cross_origin_source(self, target_origin: str, args: dict) -> Optional[str]:
+        """
+        Check whether any argument value matches a value recently returned
+        by a tool call on a DIFFERENT origin.
+
+        Returns:
+            The source origin slug if a match is found, else None
+        """
+        arg_values = set(self._flatten_leaf_values(args))
+        if not arg_values:
+            return None
+
+        for source_origin, result in reversed(self._recent_results):
+            if source_origin == target_origin:
+                continue
+            result_values = set(self._flatten_leaf_values(result))
+            if arg_values & result_values:
+                return source_origin
+
+        return None
+
+    def _record_result(self, origin_slug: str, result) -> None:
+        """Record a tool result for later cross-origin detection."""
+        self._recent_results.append((origin_slug, result))
+        if len(self._recent_results) > self._recent_results_limit:
+            self._recent_results.pop(0)
+
+    async def _capture_diff_state(self, page) -> Optional[dict]:
+        """Capture a normalized page-state snapshot for result diffing."""
+        from .result_diffing import DOMCapture
+
+        try:
+            page_json = await self.browser.capture_page_json(page=page)
+        except Exception as e:
+            logger.warning(f"Could not capture page state for diffing: {e}")
+            return None
+
+        # include_html=True so a diff catches real DOM mutations (e.g. a
+        # cart count updating) - the forms/inputs/buttons-only view misses
+        # most real WebMCP tool effects, which change ordinary page content.
+        return DOMCapture.capture_state(page_json, include_html=True, include_cookies=False)
+
+    async def _compute_result_diff(
+        self, before_state: dict, tool_name: str, origin_slug: str, result: Any, page
+    ) -> Optional[dict]:
+        """Capture the after-state and compute a before/after diff."""
+        from .result_diffing import ResultDiffer
+
+        after_state = await self._capture_diff_state(page)
+        if after_state is None:
+            return None
+
+        state_diff = ResultDiffer.diff_dicts(before_state, after_state, tool_name, origin_slug, result)
+        return state_diff.to_dict()
+
+    async def _invoke_tool(self, tool: WebMCPTool, args: dict, page) -> Any:
+        """
+        Dispatch a tool call based on how it was discovered.
+
+        Real WebMCP tools (imperative) have a captured `execute` callback.
+        Declarative-tier tools (forms, JSON-LD Actions with an EntryPoint)
+        have no such callback, so they're invoked differently - or, if
+        genuinely uncallable (llms.txt, JSON-LD Actions with no EntryPoint),
+        rejected with a clear reason rather than silently attempting an
+        imperative call that could never work.
+        """
+        invocation = tool.invocation or {"type": "imperative"}
+        invocation_type = invocation.get("type", "imperative")
+
+        if invocation_type == "unsupported":
+            raise RuntimeError(
+                invocation.get("reason", "This tool has no callable endpoint")
+            )
+
+        if invocation_type == "form":
+            return await self.browser.submit_form(invocation["selector"], args, page=page)
+
+        if invocation_type == "json_ld_entrypoint":
+            return await self.browser.call_json_ld_entrypoint(
+                invocation["url_template"], invocation.get("http_method", "GET"), args, page=page
+            )
+
+        return await self.browser.call_tool(tool.name, args, page=page)
+
     async def call_tool(self, origin_slug: str, tool_name: str, args: dict) -> ToolCallResult:
         """
         Invoke a discovered WebMCP tool for real, in the live browser page.
@@ -291,17 +408,44 @@ class WebMCPBridge:
                 self.security.log_tool_call(origin_slug, tool.name, False, error=error)
                 return ToolCallResult(success=False, error=error)
 
+        source_origin = self._detect_cross_origin_source(origin_slug, args)
+        if source_origin:
+            cross_origin_allowed = await self.interceptor.cross_origin_check(
+                source_origin, origin_slug, tool.name, data_preview=json.dumps(args)[:200]
+            )
+            if not cross_origin_allowed:
+                error = (
+                    f"Cross-origin data flow from '{source_origin}' to '{origin_slug}' "
+                    f"blocked for tool '{tool.name}'"
+                )
+                self.security.log_tool_call(origin_slug, tool.name, False, error=error)
+                return ToolCallResult(success=False, error=error)
+
         allowed, reason = await self.interceptor.before_tool_call(origin_slug, tool.name, args)
         if not allowed:
             error = reason or f"Tool call blocked by interceptor: {tool.name}"
             self.security.log_tool_call(origin_slug, tool.name, False, error=error)
             return ToolCallResult(success=False, error=error)
 
+        page = await self.browser.get_page_for_origin(origin_slug)
+
         try:
-            result = await self.browser.call_tool(tool.name, args)
+            before_state = None
+            if self.enable_result_diffing:
+                before_state = await self._capture_diff_state(page)
+
+            result = await self._invoke_tool(tool, args, page)
+            self._record_result(origin_slug, result)
+
+            diff = None
+            if self.enable_result_diffing and before_state is not None:
+                diff = await self._compute_result_diff(
+                    before_state, tool.name, origin_slug, result, page
+                )
+
             await self.interceptor.after_tool_call(origin_slug, tool.name, args, result)
             self.security.log_tool_call(origin_slug, tool.name, True)
-            return ToolCallResult(success=True, result=result)
+            return ToolCallResult(success=True, result=result, diff=diff)
         except Exception as e:
             logger.error(f"Tool call failed: {origin_slug}/{tool.name}: {e}")
             await self.interceptor.after_tool_call(

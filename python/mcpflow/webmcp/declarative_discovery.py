@@ -86,6 +86,10 @@ class DeclarativeDiscovery:
                     "properties": {},
                     "required": [],
                 },
+                "invocation": {
+                    "type": "unsupported",
+                    "reason": "No EntryPoint target with a urlTemplate was found for this Action",
+                },
             }
 
             # Extract input properties from object or result
@@ -97,6 +101,17 @@ class DeclarativeDiscovery:
                             "type": "string",
                             "description": f"{prop}",
                         }
+
+            # schema.org Actions may declare a callable EntryPoint target -
+            # if present, this tool can actually be invoked via HTTP fetch
+            # inside the page (so the user's session cookies apply).
+            target = data.get("target")
+            if isinstance(target, dict) and target.get("urlTemplate"):
+                tool["invocation"] = {
+                    "type": "json_ld_entrypoint",
+                    "url_template": target["urlTemplate"],
+                    "http_method": target.get("httpMethod", "GET"),
+                }
 
             actions.append(tool)
 
@@ -173,6 +188,10 @@ class DeclarativeDiscovery:
                         "required": form_data.get("required", []),
                     },
                     "destructive": form_data.get("destructive", False),
+                    "invocation": {
+                        "type": "form",
+                        "selector": f'form[data-tool-name="{form_data["name"]}"]',
+                    },
                 }
                 tools.append(tool)
 
@@ -190,16 +209,28 @@ class DeclarativeDiscovery:
 
         Args:
             page: Playwright page instance (to navigate to /llms.txt)
-            origin: Origin URL
+            origin: Full page URL discovery was run on - only the scheme
+                and host are used, since llms.txt is a site-root convention
 
         Returns:
             List of discovered tools, or empty if file not found
         """
         tools = []
 
+        from urllib.parse import urlparse
+
+        parsed = urlparse(origin)
+        if parsed.scheme not in ("http", "https"):
+            # llms.txt is an HTTP(S) site-root convention; skip cleanly for
+            # file:// and other schemes rather than attempting an invalid
+            # navigation (e.g. appending "/llms.txt" onto a file path).
+            logger.debug(f"Skipping llms.txt discovery for non-HTTP origin: {origin}")
+            return tools
+
         try:
-            # Navigate to /llms.txt
-            llms_url = f"{origin}/llms.txt"
+            # Navigate to /llms.txt at the site root, not wherever `origin`'s
+            # own path happens to point
+            llms_url = f"{parsed.scheme}://{parsed.netloc}/llms.txt"
             response = await page.goto(llms_url, wait_until="networkidle")
 
             if response.status != 200:
@@ -230,6 +261,10 @@ class DeclarativeDiscovery:
                         "name": line.split(":", 1)[1].strip(),
                         "description": "",
                         "input_schema": {"type": "object", "properties": {}, "required": []},
+                        "invocation": {
+                            "type": "unsupported",
+                            "reason": "llms.txt tools are informational only; no callable endpoint",
+                        },
                     }
                 elif current_tool and line.startswith("description:"):
                     current_tool["description"] = line.split(":", 1)[1].strip()

@@ -23,7 +23,7 @@ class ToolDiscovery:
         self.browser = browser_controller
 
     async def discover_tools(
-        self, url: str, origin: str, fallback: bool = False
+        self, url: str, origin: str, fallback: bool = False, page=None
     ) -> Optional[WebMCPManifest]:
         """
         Discover WebMCP tools on a page.
@@ -35,6 +35,9 @@ class ToolDiscovery:
                 the declarative fallback tier (JSON-LD actions, annotated
                 HTML forms, /llms.txt) so non-WebMCP sites still yield usable
                 tool manifests.
+            page: Playwright page to use (defaults to the browser
+                controller's default page; pass a dedicated per-origin page
+                from get_page_for_origin() for concurrent multi-origin use)
 
         Returns:
             WebMCPManifest with discovered tools, or None if discovery failed
@@ -44,17 +47,17 @@ class ToolDiscovery:
         # added, so this order is required to catch tools registered during
         # the page's initial load.
         try:
-            await self.browser.prepare_discovery()
+            await self.browser.prepare_discovery(page=page)
         except Exception as e:
             logger.error(f"Discovery script preparation failed: {e}")
             return None
 
-        if not await self.browser.navigate(url):
+        if not await self.browser.navigate(url, page=page):
             logger.error(f"Failed to navigate to {url}")
             return None
 
         try:
-            tools_list = await self.browser.get_discovered_tools()
+            tools_list = await self.browser.get_discovered_tools(page=page)
         except Exception as e:
             logger.error(f"Discovery read-back failed: {e}")
             return None
@@ -67,11 +70,12 @@ class ToolDiscovery:
             )
             from .declarative_discovery import DeclarativeDiscovery
 
-            tools_list = await DeclarativeDiscovery.discover_all(self.browser.page, url)
+            actual_page = page or self.browser.page
+            tools_list = await DeclarativeDiscovery.discover_all(actual_page, url)
             # discover_from_llms_txt navigates to {origin}/llms.txt; return to
             # the original page so content hashing and later tool calls see
             # the intended page.
-            await self.browser.navigate(url)
+            await self.browser.navigate(url, page=page)
 
         if not tools_list:
             logger.warning(f"No tools discovered on {url}")
@@ -86,6 +90,7 @@ class ToolDiscovery:
                     description=tool_data.get("description", ""),
                     input_schema=tool_data.get("input_schema", {}),
                     origin=origin,
+                    invocation=tool_data.get("invocation", {"type": "imperative"}),
                 )
                 tools.append(tool)
                 logger.debug(f"Discovered tool: {tool.name}")
@@ -94,7 +99,7 @@ class ToolDiscovery:
                 continue
 
         # Generate content hash for change detection
-        page_content = await self.browser.get_page_content()
+        page_content = await self.browser.get_page_content(page=page)
         content_hash = hashlib.sha256(page_content.encode()).hexdigest()
 
         manifest = WebMCPManifest(

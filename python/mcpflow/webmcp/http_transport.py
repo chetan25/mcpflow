@@ -53,8 +53,21 @@ class StreamableHTTPTransport:
         """
         self.request_handlers[method] = handler
 
-    async def start(self):
-        """Start the HTTP transport server."""
+    def build_app(self):
+        """
+        Build (or return the already-built) FastAPI ASGI app with all
+        routes registered, without starting a real server.
+
+        Split out from start() so the app can be exercised directly by an
+        ASGI-level test client (e.g. httpx.ASGITransport) without binding a
+        real port or blocking on uvicorn.serve().
+
+        Returns:
+            The FastAPI app instance
+        """
+        if self.app is not None:
+            return self.app
+
         try:
             from fastapi import FastAPI, Request, Response
             from fastapi.responses import StreamingResponse
@@ -84,6 +97,15 @@ class StreamableHTTPTransport:
                 result = await handler(data)
                 return result
             return {"initialized": True}
+
+        @self.app.post("/discover")
+        async def discover(request: Request):
+            """Discover WebMCP tools on an origin."""
+            data = await request.json()
+            handler = self.request_handlers.get("POST /discover")
+            if not handler:
+                return {"error": "No handler registered"}
+            return await handler(data)
 
         @self.app.post("/mcp/call_tool")
         async def call_tool(request: Request):
@@ -139,10 +161,15 @@ class StreamableHTTPTransport:
                 "active_streams": len(self.sse_connections),
             }
 
-        # Start server
+        return self.app
+
+    async def start(self):
+        """Build the app (if not already built) and serve it with uvicorn."""
+        app = self.build_app()
+
         import uvicorn
 
-        config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="info")
+        config = uvicorn.Config(app, host=self.host, port=self.port, log_level="info")
         server = uvicorn.Server(config)
         logger.info(f"Starting HTTP transport on http://{self.host}:{self.port}")
 
@@ -224,11 +251,12 @@ class HTTPBridgeServer:
         async def handle_discover(data):
             """Handle discovery request."""
             origin = data.get("origin")
+            origin_slug = data.get("origin_slug")
             if not origin:
                 return {"error": "origin required"}
 
             try:
-                manifest = await self.bridge.discover(origin)
+                manifest = await self.bridge.discover(origin, origin_slug=origin_slug)
                 return {
                     "origin": origin,
                     "tools": [

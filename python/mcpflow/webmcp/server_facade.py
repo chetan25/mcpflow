@@ -125,6 +125,21 @@ class WebMCPServer:
             if name in _META_TOOLS:
                 return await self._call_meta_tool(name, arguments)
 
+            tool = self.bridge._resolve_tool(self.origin_slug, name)
+            if (
+                tool
+                and self.bridge.policy_enforcer
+                and self.bridge.policy_enforcer.requires_confirmation(tool.name)
+            ):
+                confirmed = await self._confirm_destructive_call(tool.name, arguments)
+                if not confirmed:
+                    return self.TextContent(
+                        text=json.dumps(
+                            {"error": f"Tool call to '{tool.name}' was not confirmed by the user"}
+                        ),
+                        type="text",
+                    )
+
             # Generate task ID for streaming
             task_id = str(uuid.uuid4())
 
@@ -149,6 +164,42 @@ class WebMCPServer:
                     text=json.dumps({"error": "No response from tool"}),
                     type="text",
                 )
+
+    async def _confirm_destructive_call(self, tool_name: str, arguments: dict) -> bool:
+        """
+        Request human confirmation via MCP elicitation before running a
+        destructive-flagged tool (spec section 3.6.4).
+
+        Fails closed: if the connected client doesn't support elicitation,
+        declines, or cancels, the call is blocked rather than allowed to
+        proceed silently.
+        """
+        try:
+            session = self.server.request_context.session
+            result = await session.elicit_form(
+                message=(
+                    f"Confirm: allow calling destructive tool '{tool_name}' "
+                    f"with arguments {json.dumps(arguments)}?"
+                ),
+                requestedSchema={
+                    "type": "object",
+                    "properties": {
+                        "confirm": {
+                            "type": "boolean",
+                            "description": "Allow this tool call?",
+                        }
+                    },
+                    "required": ["confirm"],
+                },
+            )
+            return result.action == "accept" and bool(
+                result.content and result.content.get("confirm")
+            )
+        except Exception as e:
+            logger.warning(
+                f"Elicitation unavailable or failed for '{tool_name}'; failing closed: {e}"
+            )
+            return False
 
     async def _notify_tools_changed(self):
         """Best-effort notifications/tools/list_changed push to the connected client."""
@@ -177,7 +228,8 @@ class WebMCPServer:
 
         if name == "webmcp_screenshot":
             filename = arguments.get("filename", "webmcp_debug.png")
-            await self.bridge.browser.screenshot(filename)
+            page = await self.bridge.browser.get_page_for_origin(self.origin_slug)
+            await self.bridge.browser.screenshot(filename, page=page)
             return self.TextContent(text=json.dumps({"screenshot": filename}), type="text")
 
         if name == "webmcp_login":
