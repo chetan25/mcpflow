@@ -42,6 +42,9 @@ webmcp = [
     "playwright>=1.40.0",
     "mcp>=0.7.0",
 ]
+llm = [
+    "litellm>=1.40.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

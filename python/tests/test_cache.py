@@ -24,14 +24,16 @@ def test_cache_hit_within_ttl():
 
 
 def test_cache_expires_after_ttl():
-    cache = ManifestCache(default_ttl_seconds=0)
+    cache = ManifestCache(default_ttl_seconds=60)
     manifest = _manifest()
     cache.set("example.com", manifest)
 
-    # TTL of 0 means any elapsed time (even ~0s) expires it
-    import time
+    # Backdate the cached-at timestamp instead of sleeping in real time -
+    # asserting expiry via a real sleep() raced the monotonic clock on some
+    # runs. Simulating elapsed time deterministically avoids that.
+    stored_manifest, cached_at, ttl_seconds = cache._entries["example.com"]
+    cache._entries["example.com"] = (stored_manifest, cached_at - 61, ttl_seconds)
 
-    time.sleep(0.01)
     assert cache.get("example.com") is None
 
 
@@ -55,11 +57,12 @@ def test_cache_invalidate():
 
 def test_cache_per_entry_ttl_override():
     cache = ManifestCache(default_ttl_seconds=3600)
-    cache.set("example.com", _manifest(), ttl_seconds=0)
+    cache.set("example.com", _manifest(), ttl_seconds=5)
 
-    import time
+    stored_manifest, cached_at, ttl_seconds = cache._entries["example.com"]
+    assert ttl_seconds == 5
+    cache._entries["example.com"] = (stored_manifest, cached_at - 6, ttl_seconds)
 
-    time.sleep(0.01)
     assert cache.get("example.com") is None
 
 
