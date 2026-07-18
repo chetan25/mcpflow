@@ -260,7 +260,7 @@ origins:
 |-----|--------|-----------------|
 | G1 | 🟡 | Stdio transport now uses the real `mcp.server.stdio.stdio_server()` API (was calling a non-existent `stdio_session()`); Streamable HTTP exists but is untested against a real client |
 | G2 | 🟡 | Streaming now wraps a real tool call via `WebMCPBridge.call_tool()` (previously simulated with `asyncio.sleep` and fake progress %); not yet verified end-to-end |
-| G3 | ❌ | Not addressed. `ChatManager(model=...)` still just stores a string and `_generate_response()` is a stub (`"Response from {model} model"`) — there are no provider adapters. InterceptorProtocol is a security seam, unrelated to G3 |
+| G3 | 🟡 | Addressed 2026-07-18: `ChatManager` now runs a real generate/tool-call loop against a provider-agnostic `LLMProvider` protocol (`mcpflow/providers/`) instead of a hardcoded stub. Ships `OpenAICompatibleProvider` (zero-dep, covers OpenRouter/Ollama/Groq/Together) and `LiteLLMProvider` (optional, broader coverage) — no fixed provider list. Not yet verified against a real API key/network call, only against mocked transports |
 | G4 | ❌ | Package metadata/CI workflow exist, but no git tag has ever been created or pushed, so `publish.yml` has never run and nothing has been published |
 | G5 | ❌ | Not started; depends on G4 |
 | G6 | 🟡 | Encrypted session storage is real; the wiring to actually apply a saved session before discovery/calls (`apply_profile_to_context`) and the missing `BrowserController.create_context()` it depended on have just been added |
