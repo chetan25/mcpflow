@@ -1,10 +1,14 @@
 """MCP server facade for WebMCP bridge."""
 
+import asyncio
 import logging
 from typing import Optional
 import sys
 import json
 import uuid
+
+# Meta-tools exposed alongside discovered WebMCP tools (spec section 3.7)
+_META_TOOLS = {"webmcp_list_origins", "webmcp_rescan", "webmcp_screenshot", "webmcp_login"}
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +52,17 @@ class WebMCPServer:
         # Create server
         self.server = self.Server("webmcp-bridge")
 
+        # Forward bridge-level tool-set changes as MCP notifications/tools/list_changed
+        def _on_tools_changed(origin_slug, manifest):
+            if origin_slug != self.origin_slug:
+                return
+            asyncio.create_task(self._notify_tools_changed())
+
+        self.bridge.on_tools_changed(_on_tools_changed)
+
         @self.server.list_tools()
         async def list_tools():
-            """List all available tools from WebMCP origin."""
+            """List all available tools from WebMCP origin, plus bridge meta-tools."""
             mcp_tools = self.bridge.get_mcp_tools(self.origin_slug)
             tools = []
             for tool_def in mcp_tools:
@@ -61,40 +73,65 @@ class WebMCPServer:
                         inputSchema=tool_def.get("inputSchema", {}),
                     )
                 )
+
+            tools.append(
+                self.Tool(
+                    name="webmcp_list_origins",
+                    description="List origins currently registered with this bridge",
+                    inputSchema={"type": "object", "properties": {}},
+                )
+            )
+            tools.append(
+                self.Tool(
+                    name="webmcp_rescan",
+                    description=(
+                        "Force a re-scan of this origin's WebMCP tools, "
+                        "bypassing the manifest cache"
+                    ),
+                    inputSchema={"type": "object", "properties": {}},
+                )
+            )
+            tools.append(
+                self.Tool(
+                    name="webmcp_screenshot",
+                    description="Take a debug screenshot of the current page state",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {"filename": {"type": "string"}},
+                        "required": ["filename"],
+                    },
+                )
+            )
+            tools.append(
+                self.Tool(
+                    name="webmcp_login",
+                    description=(
+                        "Open a headed browser window for the user to log in to this "
+                        "origin, then save the session as a reusable profile"
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {"profile_name": {"type": "string"}},
+                    },
+                )
+            )
             return tools
 
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict):
-            """Call a WebMCP tool with streaming support."""
+            """Call a WebMCP tool with streaming support, or a bridge meta-tool."""
             logger.info(f"Tool called: {name} with args {arguments}")
+
+            if name in _META_TOOLS:
+                return await self._call_meta_tool(name, arguments)
 
             # Generate task ID for streaming
             task_id = str(uuid.uuid4())
 
-            # Get tool info
-            manifest = self.bridge.manifests.get(self.origin_slug)
-            if not manifest:
-                return self.TextContent(
-                    text=json.dumps({"error": "Origin not discovered. Run discovery first."}),
-                    type="text",
-                )
-
-            # Check if tool exists
-            found = False
-            for tool in manifest.tools:
-                mcp_name = f"{self.origin_slug}__{tool.name}".replace(".", "_").replace("-", "_")
-                if mcp_name == name:
-                    found = True
-                    break
-
-            if not found:
-                self.bridge.security.log_tool_call(self.origin_slug, name, False, error="Tool not found")
-                return self.TextContent(
-                    text=json.dumps({"error": f"Tool not found: {name}"}),
-                    type="text",
-                )
-
-            # Execute with streaming and collect chunks
+            # Execute with streaming and collect chunks. stream_to_mcp_content_blocks
+            # (via execute_streaming) already handles "origin not discovered" and
+            # "tool not found" by yielding an error chunk, so there's no need to
+            # duplicate that lookup here.
             chunks = await self.streaming.stream_to_mcp_content_blocks(
                 origin=self.origin_slug,
                 tool_name=name,
@@ -113,14 +150,69 @@ class WebMCPServer:
                     type="text",
                 )
 
+    async def _notify_tools_changed(self):
+        """Best-effort notifications/tools/list_changed push to the connected client."""
+        try:
+            session = self.server.request_context.session
+            await session.send_tool_list_changed()
+        except Exception as e:
+            logger.debug(f"Could not send tools/list_changed notification: {e}")
+
+    async def _call_meta_tool(self, name: str, arguments: dict):
+        """Handle bridge meta-tools (webmcp_list_origins/rescan/screenshot/login)."""
+        if name == "webmcp_list_origins":
+            origins = list(self.bridge.manifests.keys())
+            return self.TextContent(text=json.dumps({"origins": origins}), type="text")
+
+        if name == "webmcp_rescan":
+            try:
+                manifest = await self.bridge.rescan(self.origin_slug)
+            except ValueError as e:
+                return self.TextContent(text=json.dumps({"error": str(e)}), type="text")
+            tool_names = [t.name for t in manifest.tools] if manifest else []
+            return self.TextContent(
+                text=json.dumps({"origin": self.origin_slug, "tools": tool_names}),
+                type="text",
+            )
+
+        if name == "webmcp_screenshot":
+            filename = arguments.get("filename", "webmcp_debug.png")
+            await self.bridge.browser.screenshot(filename)
+            return self.TextContent(text=json.dumps({"screenshot": filename}), type="text")
+
+        if name == "webmcp_login":
+            profile_name = arguments.get("profile_name", self.origin_slug)
+            url = self.bridge._origin_urls.get(self.origin_slug)
+            if not url:
+                return self.TextContent(
+                    text=json.dumps({"error": f"No known URL for origin '{self.origin_slug}'"}),
+                    type="text",
+                )
+            ok = await self.bridge.session_manager.create_profile(
+                profile_name, self.bridge.browser, url, headed=True
+            )
+            return self.TextContent(
+                text=json.dumps({"success": ok, "profile": profile_name}), type="text"
+            )
+
+        return self.TextContent(
+            text=json.dumps({"error": f"Unknown meta-tool: {name}"}), type="text"
+        )
+
     async def run(self):
         """Run the server with stdio transport."""
         if not self.server:
             await self.initialize()
 
+        from mcp.server.stdio import stdio_server
+
         try:
-            async with self.server.stdio_session() as session:
-                await session.wait()
+            async with stdio_server() as (read_stream, write_stream):
+                await self.server.run(
+                    read_stream,
+                    write_stream,
+                    self.server.create_initialization_options(),
+                )
         except Exception as e:
             logger.error(f"Server error: {e}")
             raise

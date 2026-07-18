@@ -342,3 +342,104 @@ async def test_registry_auth_token_handling(mock_httpx_client):
     call_args = mock_httpx_client.get.call_args
     headers = call_args[1].get("headers", {})
     assert headers.get("Authorization") == "Bearer secret-token-123"
+
+
+class _FakeToolCallResult:
+    def __init__(self, success=True, result=None, error=None):
+        self.success = success
+        self.result = result
+        self.error = error
+
+
+class _FakeWebMCPBridge:
+    """Stands in for mcpflow.webmcp.WebMCPBridge without requiring playwright/mcp."""
+
+    def __init__(self, tools=None, discover_returns_none=False, call_result=None):
+        self._tools = tools or [
+            {"name": "shop_example_com__addToCart", "description": "Add to cart", "inputSchema": {}},
+        ]
+        self._discover_returns_none = discover_returns_none
+        self._call_result = call_result or _FakeToolCallResult(result={"ok": True})
+        self.discover_calls = []
+        self.call_tool_calls = []
+        self.closed = False
+
+    async def discover(self, url, origin_slug=None):
+        self.discover_calls.append((url, origin_slug))
+        if self._discover_returns_none:
+            return None
+        return object()  # any non-None manifest stand-in
+
+    def get_mcp_tools(self, origin_slug):
+        return self._tools
+
+    async def call_tool(self, origin_slug, tool_name, args):
+        self.call_tool_calls.append((origin_slug, tool_name, args))
+        return self._call_result
+
+    async def close(self):
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_register_webmcp_discovers_and_registers_tools():
+    """register_webmcp() discovers tools and makes them first-class registry entries."""
+    registry = MCPRegistry()
+    bridge = _FakeWebMCPBridge()
+
+    tools = await registry.register_webmcp(bridge, "https://shop.example.com")
+
+    # origin_slug is derived the same way WebMCPBridge.discover() derives it
+    # (underscored, matching the translator's namespacing convention) when
+    # not passed explicitly.
+    assert len(tools) == 1
+    assert tools[0].name == "shop_example_com__addToCart"
+    assert "shop_example_com" in registry.get_registered_mcps()
+    assert bridge.discover_calls == [("https://shop.example.com", "shop_example_com")]
+
+
+@pytest.mark.asyncio
+async def test_register_webmcp_raises_when_discovery_fails():
+    """register_webmcp() raises ValueError when the bridge can't discover the origin."""
+    registry = MCPRegistry()
+    bridge = _FakeWebMCPBridge(discover_returns_none=True)
+
+    with pytest.raises(ValueError):
+        await registry.register_webmcp(bridge, "https://blocked.example.com")
+
+
+@pytest.mark.asyncio
+async def test_call_tool_dispatches_to_registered_webmcp_bridge():
+    """call_tool() routes to the WebMCP bridge, not the HTTP bridge path."""
+    registry = MCPRegistry()
+    bridge = _FakeWebMCPBridge(call_result=_FakeToolCallResult(result={"sum": 5}))
+    await registry.register_webmcp(bridge, "https://shop.example.com", origin_slug="shop.example.com")
+
+    result = await registry.call_tool("shop.example.com", "addToCart", {"sku": "ABC"})
+
+    assert result == {"success": True, "result": {"sum": 5}, "error": None}
+    assert bridge.call_tool_calls == [("shop.example.com", "addToCart", {"sku": "ABC"})]
+
+
+@pytest.mark.asyncio
+async def test_call_tool_raises_when_webmcp_call_fails():
+    """call_tool() raises ValueError when the WebMCP bridge reports failure."""
+    registry = MCPRegistry()
+    bridge = _FakeWebMCPBridge(call_result=_FakeToolCallResult(success=False, error="Tool not found"))
+    await registry.register_webmcp(bridge, "https://shop.example.com", origin_slug="shop.example.com")
+
+    with pytest.raises(ValueError, match="Tool not found"):
+        await registry.call_tool("shop.example.com", "addToCart", {})
+
+
+@pytest.mark.asyncio
+async def test_close_all_closes_webmcp_bridges():
+    """close_all() closes WebMCP bridges alongside HTTP bridges."""
+    registry = MCPRegistry()
+    bridge = _FakeWebMCPBridge()
+    await registry.register_webmcp(bridge, "https://shop.example.com")
+
+    await registry.close_all()
+
+    assert bridge.closed is True
+    assert registry.get_registered_mcps() == []

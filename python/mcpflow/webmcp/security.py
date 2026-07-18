@@ -50,6 +50,26 @@ class SecurityManager:
             logger.warning(f"Origin not allowed: {origin}")
         return allowed
 
+    def check_tool_call(self, origin: str, tool_name: str) -> tuple[bool, Optional[str]]:
+        """
+        Security-manager-level check before a tool call proceeds.
+
+        Origin admission is enforced once at discovery time
+        (check_origin_allowed); this hook is the security-manager-level gate
+        InterceptorProtocol implementations call before executing a tool, and
+        is where future rules (rate limits, kill switches) would live.
+        Fine-grained per-tool allow/deny/destructive rules live in
+        PolicyEnforcer (see WebMCPBridge.policy_enforcer).
+
+        Args:
+            origin: Origin identifier
+            tool_name: Tool name being called
+
+        Returns:
+            Tuple of (allowed, reason)
+        """
+        return True, None
+
     def sanitize_tool_description(self, description: str) -> tuple[str, bool]:
         """
         Sanitize tool description and flag suspicious patterns.
@@ -110,7 +130,14 @@ class SecurityManager:
         }
         self._append_audit_log(event)
 
-    def log_tool_call(self, origin: str, tool_name: str, success: bool, error: Optional[str] = None):
+    def log_tool_call(
+        self,
+        origin: str,
+        tool_name: str,
+        success: bool,
+        error: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ):
         """
         Log a tool invocation.
 
@@ -119,6 +146,8 @@ class SecurityManager:
             tool_name: Tool name
             success: Whether the call succeeded
             error: Error message if failed
+            metadata: Additional context to attach to the audit entry (e.g.
+                which InterceptorProtocol event triggered this log line)
         """
         import time
 
@@ -131,6 +160,8 @@ class SecurityManager:
         }
         if error:
             event["error"] = error
+        if metadata:
+            event["metadata"] = metadata
 
         self._append_audit_log(event)
 

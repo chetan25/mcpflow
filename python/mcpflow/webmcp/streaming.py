@@ -1,6 +1,7 @@
 """Streaming and progress notification support for WebMCP bridge."""
 
 import asyncio
+import json
 import logging
 from typing import AsyncIterator, Optional, Any
 from dataclasses import dataclass, asdict
@@ -120,49 +121,56 @@ class StreamingToolExecutor:
                 content=f'{{"tool": "{tool.name}", "description": "{tool.description}", "status": "executing"}}',
                 chunk_type="json",
             )
+            self.active_tasks[task_id]["chunks_sent"] += 1
 
-            # Emit progress notifications (simulated for now; Phase 2.2 adds real execution)
-            for progress in [25, 50, 75, 100]:
-                await asyncio.sleep(0.1)  # Simulate work
+            # Let the client know the call is in flight in the browser
+            notification = ProgressNotification(
+                tool_name=tool.name,
+                task_id=task_id,
+                progress=50,
+                message=f"Calling {tool.name} in the browser...",
+            )
+            yield StreamChunk(
+                content=f'{{"type": "progress", "data": {notification.to_dict()}}}',
+                chunk_type="json",
+            )
+            self.active_tasks[task_id]["chunks_sent"] += 1
 
-                notification = ProgressNotification(
-                    tool_name=tool.name,
-                    task_id=task_id,
-                    progress=progress,
-                    message=f"Executing {tool.name}... {progress}% complete",
-                )
+            # Execute the tool for real via the bridge (navigates/evaluates
+            # navigator.modelContext in the live page)
+            call_result = await self.bridge.call_tool(origin, tool.name, args)
 
+            if not call_result.success:
                 yield StreamChunk(
-                    content=f'{{"type": "progress", "data": {notification.to_dict()}}}',
+                    content=json.dumps(
+                        {"tool": tool.name, "status": "error", "error": call_result.error}
+                    ),
                     chunk_type="json",
+                    is_final=True,
                 )
+                return
 
-                self.active_tasks[task_id]["chunks_sent"] += 1
-
-            # Send final result
-            result = {
+            result_payload = {
                 "tool": tool.name,
                 "status": "success",
-                "result": {"input": args, "schema": tool.input_schema},
+                "result": call_result.result,
                 "chunks_sent": self.active_tasks[task_id]["chunks_sent"],
             }
             yield StreamChunk(
-                content=f'{result}',
+                content=json.dumps(result_payload),
                 chunk_type="json",
                 is_final=True,
             )
 
-            self.bridge.security.log_tool_call(origin, tool.name, True)
             logger.info(f"Streaming execution completed: {tool_name} (task: {task_id})")
 
         except Exception as e:
             logger.error(f"Streaming execution failed: {e}")
             yield StreamChunk(
-                content=f'{{"error": "{str(e)}"}}',
+                content=json.dumps({"error": str(e)}),
                 chunk_type="json",
                 is_final=True,
             )
-            self.bridge.security.log_tool_call(origin, tool_name, False, error=str(e))
 
         finally:
             # Clean up task

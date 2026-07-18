@@ -1,5 +1,6 @@
 """SessionProfile management with encrypted persistence."""
 
+import asyncio
 import os
 import json
 import logging
@@ -390,6 +391,52 @@ class SessionProfileManager:
 
         return credentials
 
+    async def apply_profile_to_context(self, name: str, context) -> bool:
+        """
+        Apply a saved profile's credentials directly onto an existing browser context.
+
+        Unlike load_profile_for_browser (which creates its own isolated
+        context for standalone use), this mutates a context a WebMCPBridge is
+        already using, so a loaded session actually takes effect on
+        subsequent navigate()/call_tool() calls against that same browser.
+
+        Args:
+            name: Profile name
+            context: An already-created Playwright BrowserContext
+
+        Returns:
+            True if the profile was found and applied, False otherwise
+        """
+        profile_data = self.store.load_profile(name)
+
+        if not profile_data:
+            logger.warning(f"Profile not found: {name}")
+            return False
+
+        credentials = profile_data.get("credentials", {})
+
+        try:
+            if credentials.get("cookies"):
+                await context.add_cookies(credentials["cookies"])
+
+            if credentials.get("localStorage"):
+                page = context.pages[0] if context.pages else await context.new_page()
+                await page.evaluate(
+                    """(items) => {
+                        for (const [key, value] of Object.entries(items)) {
+                            localStorage.setItem(key, value);
+                        }
+                    }""",
+                    credentials["localStorage"],
+                )
+
+            logger.info(f"Applied profile to active context: {name}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to apply profile {name}: {e}")
+            return False
+
     def get_profile_path(self, name: str) -> Optional[Path]:
         """Get file path of a profile."""
         profile_file = self.store.profile_dir / f"{name}.enc"
@@ -398,7 +445,3 @@ class SessionProfileManager:
     def list_profiles(self) -> list:
         """List available profiles."""
         return self.store.list_profiles()
-
-
-# Lazy import asyncio to avoid circular dependencies
-import asyncio

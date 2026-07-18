@@ -101,6 +101,25 @@ class TestSecurityManager:
         assert has_risk is True
         assert "always" not in risky.lower()
 
+    def test_check_tool_call_allows_by_default(self):
+        """check_tool_call is the real method DefaultInterceptor depends on
+        (previously missing entirely, which crashed on first real use)."""
+        manager = SecurityManager()
+
+        allowed, reason = manager.check_tool_call("example.com", "addToCart")
+        assert allowed is True
+        assert reason is None
+
+    def test_log_tool_call_accepts_metadata(self):
+        """log_tool_call accepts the metadata kwarg InterceptorProtocol's
+        log_event() passes (previously a TypeError on first real use)."""
+        manager = SecurityManager()
+
+        # Should not raise
+        manager.log_tool_call(
+            "example.com", "addToCart", True, metadata={"event_type": "before_tool_call"}
+        )
+
     @patch("builtins.open", create=True)
     def test_logging(self, mock_open):
         """Test audit logging."""

@@ -73,9 +73,19 @@ def test_stream_chunk_final():
 
 # Mock bridge for testing
 class MockBridge:
-    def __init__(self):
+    def __init__(self, call_result=None):
         self.manifests = {}
         self.security = MockSecurity()
+        self._call_result = call_result
+        self.calls = []
+
+    async def call_tool(self, origin, tool_name, args):
+        from mcpflow.webmcp.types import ToolCallResult
+
+        self.calls.append((origin, tool_name, args))
+        if self._call_result is not None:
+            return self._call_result
+        return ToolCallResult(success=True, result={"echo": args})
 
 
 class MockSecurity:
@@ -136,8 +146,50 @@ async def test_streaming_executor_execute_streaming():
     # Last chunk should be final
     assert chunks[-1].is_final is True
 
+    # The real call should have gone through bridge.call_tool with the
+    # *original* (non-namespaced) tool name, and the final chunk should
+    # carry the real result bridge.call_tool returned -- not a simulated
+    # echo of the raw input/schema.
+    assert bridge.calls == [("test.example.com", "testTool", {})]
+    assert '"status": "success"' in chunks[-1].content
+    assert '"echo"' in chunks[-1].content
+
     # Verify task was cleaned up
     assert "task-999" not in executor.active_tasks
+
+
+@pytest.mark.asyncio
+async def test_streaming_executor_execute_streaming_call_failure():
+    """When bridge.call_tool reports failure, streaming surfaces a real
+    error chunk instead of a fabricated success."""
+    from mcpflow.webmcp.types import ToolCallResult, WebMCPTool, WebMCPManifest
+
+    bridge = MockBridge(call_result=ToolCallResult(success=False, error="boom"))
+
+    tool = WebMCPTool(
+        name="testTool",
+        description="Test tool",
+        input_schema={"type": "object", "properties": {}},
+        origin="test.example.com",
+    )
+    bridge.manifests["test.example.com"] = WebMCPManifest(
+        origin="test.example.com", tools=[tool]
+    )
+
+    executor = StreamingToolExecutor(bridge)
+
+    chunks = []
+    async for chunk in executor.execute_streaming(
+        origin="test.example.com",
+        tool_name="testTool",
+        args={},
+        task_id="task-fail",
+    ):
+        chunks.append(chunk)
+
+    assert chunks[-1].is_final is True
+    assert '"status": "error"' in chunks[-1].content
+    assert "boom" in chunks[-1].content
 
 
 @pytest.mark.asyncio

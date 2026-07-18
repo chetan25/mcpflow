@@ -22,28 +22,56 @@ class ToolDiscovery:
         """
         self.browser = browser_controller
 
-    async def discover_tools(self, url: str, origin: str) -> Optional[WebMCPManifest]:
+    async def discover_tools(
+        self, url: str, origin: str, fallback: bool = False
+    ) -> Optional[WebMCPManifest]:
         """
         Discover WebMCP tools on a page.
 
         Args:
             url: Full URL to navigate to
             origin: Origin slug (e.g., 'shop.example.com')
+            fallback: If the imperative WebMCP scan finds no tools, also try
+                the declarative fallback tier (JSON-LD actions, annotated
+                HTML forms, /llms.txt) so non-WebMCP sites still yield usable
+                tool manifests.
 
         Returns:
             WebMCPManifest with discovered tools, or None if discovery failed
         """
-        # Navigate to the page
+        # Install the discovery hook BEFORE navigating: Playwright init
+        # scripts only take effect on navigations that happen after they're
+        # added, so this order is required to catch tools registered during
+        # the page's initial load.
+        try:
+            await self.browser.prepare_discovery()
+        except Exception as e:
+            logger.error(f"Discovery script preparation failed: {e}")
+            return None
+
         if not await self.browser.navigate(url):
             logger.error(f"Failed to navigate to {url}")
             return None
 
-        # Inject discovery script and get tools
         try:
-            tools_list = await self.browser.inject_discovery_script()
+            tools_list = await self.browser.get_discovered_tools()
         except Exception as e:
-            logger.error(f"Discovery injection failed: {e}")
+            logger.error(f"Discovery read-back failed: {e}")
             return None
+
+        tools_list = tools_list or []
+
+        if not tools_list and fallback:
+            logger.info(
+                f"No WebMCP tools found on {url}; trying declarative fallback tier"
+            )
+            from .declarative_discovery import DeclarativeDiscovery
+
+            tools_list = await DeclarativeDiscovery.discover_all(self.browser.page, url)
+            # discover_from_llms_txt navigates to {origin}/llms.txt; return to
+            # the original page so content hashing and later tool calls see
+            # the intended page.
+            await self.browser.navigate(url)
 
         if not tools_list:
             logger.warning(f"No tools discovered on {url}")

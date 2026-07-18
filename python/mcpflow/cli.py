@@ -603,8 +603,16 @@ def webmcp(ctx: click.Context) -> None:
 @click.argument("url")
 @click.option("--origins", multiple=True, help="Allowed origins (comma-separated)")
 @click.option("--origin-slug", help="Short identifier for origin (defaults to domain)")
+@click.option(
+    "--fallback",
+    is_flag=True,
+    default=False,
+    help="Fall back to JSON-LD/forms/llms.txt discovery if no WebMCP tools are found",
+)
 @click.pass_context
-def discover(ctx: click.Context, url: str, origins: tuple, origin_slug: Optional[str]) -> None:
+def discover(
+    ctx: click.Context, url: str, origins: tuple, origin_slug: Optional[str], fallback: bool
+) -> None:
     """Discover WebMCP tools on a page."""
     import asyncio
     from .webmcp import WebMCPBridge
@@ -614,7 +622,7 @@ def discover(ctx: click.Context, url: str, origins: tuple, origin_slug: Optional
     async def run():
         async with WebMCPBridge(headless=True, origins_allowlist=allowed_origins) as bridge:
             click.echo(f"🔍 Discovering tools on {url}...")
-            manifest = await bridge.discover(url, origin_slug=origin_slug)
+            manifest = await bridge.discover(url, origin_slug=origin_slug, fallback=fallback)
 
             if manifest:
                 click.echo(f"✅ Found {len(manifest.tools)} tools:")
@@ -632,8 +640,21 @@ def discover(ctx: click.Context, url: str, origins: tuple, origin_slug: Optional
 @click.option("--origins", multiple=True, help="Allowed origins")
 @click.option("--origin-slug", help="Short identifier for origin")
 @click.option("--headless/--headed", default=True, help="Run browser headless or visible")
+@click.option(
+    "--fallback",
+    is_flag=True,
+    default=False,
+    help="Fall back to JSON-LD/forms/llms.txt discovery if no WebMCP tools are found",
+)
 @click.pass_context
-def bridge(ctx: click.Context, url: str, origins: tuple, origin_slug: Optional[str], headless: bool) -> None:
+def bridge(
+    ctx: click.Context,
+    url: str,
+    origins: tuple,
+    origin_slug: Optional[str],
+    headless: bool,
+    fallback: bool,
+) -> None:
     """Run WebMCP bridge as MCP server (stdio transport for Claude Desktop)."""
     import asyncio
     from .webmcp import WebMCPBridge, WebMCPServer
@@ -646,7 +667,7 @@ def bridge(ctx: click.Context, url: str, origins: tuple, origin_slug: Optional[s
 
         async with WebMCPBridge(headless=headless, origins_allowlist=allowed_origins) as webmcp_bridge:
             click.echo(f"🔍 Discovering tools...", err=True)
-            manifest = await webmcp_bridge.discover(url, origin_slug=slug)
+            manifest = await webmcp_bridge.discover(url, origin_slug=slug, fallback=fallback)
 
             if not manifest or not manifest.tools:
                 click.echo(f"❌ No tools found on {url}", err=True)
@@ -661,6 +682,169 @@ def bridge(ctx: click.Context, url: str, origins: tuple, origin_slug: Optional[s
             await server.run()
 
     asyncio.run(run())
+
+
+@webmcp.command()
+@click.option(
+    "--origins-file",
+    type=click.Path(exists=True),
+    required=True,
+    help="Multi-origin YAML config file (see MultiOriginConfig)",
+)
+@click.option("--port", default=8931, type=int, help="HTTP server port")
+@click.option("--host", default="127.0.0.1", help="HTTP server host")
+@click.option("--headless/--headed", default=True, help="Run browser headless or visible")
+@click.option(
+    "--fallback",
+    is_flag=True,
+    default=False,
+    help="Fall back to JSON-LD/forms/llms.txt discovery if no WebMCP tools are found",
+)
+@click.pass_context
+def serve(
+    ctx: click.Context,
+    origins_file: str,
+    port: int,
+    host: str,
+    headless: bool,
+    fallback: bool,
+) -> None:
+    """Run the WebMCP bridge as a multi-origin Streamable HTTP server."""
+    import asyncio
+    from .webmcp import WebMCPBridge
+    from .webmcp.multi_origin import MultiOriginConfig
+
+    async def run():
+        config = MultiOriginConfig(config_file=origins_file)
+        enabled_origins = config.list_origins(enabled_only=True)
+
+        if not enabled_origins:
+            click.echo(f"❌ No enabled origins found in {origins_file}", err=True)
+            raise SystemExit(1)
+
+        allowed = [config.get_origin(o).origin for o in enabled_origins]
+
+        async with WebMCPBridge(
+            headless=headless,
+            origins_allowlist=allowed,
+            multi_origin_config=config,
+        ) as webmcp_bridge:
+            for origin_url in enabled_origins:
+                origin_config = config.get_origin(origin_url)
+                slug = origin_url.replace("https://", "").replace("http://", "").replace(".", "_").split("/")[0]
+
+                click.echo(f"🔍 Discovering tools on {origin_url}...", err=True)
+                manifest = await webmcp_bridge.discover(
+                    origin_url,
+                    origin_slug=slug,
+                    session_profile=origin_config.session_profile,
+                    fallback=fallback,
+                    cache_ttl_seconds=origin_config.cache_ttl_seconds,
+                )
+                if manifest:
+                    click.echo(f"✅ {len(manifest.tools)} tools on {slug}", err=True)
+                else:
+                    click.echo(f"⚠️  No tools discovered on {slug}", err=True)
+
+            click.echo(
+                f"🌐 Serving {len(enabled_origins)} origin(s) over HTTP on {host}:{port}",
+                err=True,
+            )
+            http_server = webmcp_bridge.get_http_server(host=host, port=port)
+            await http_server.start()
+
+    asyncio.run(run())
+
+
+@webmcp.command()
+@click.argument("url")
+@click.option(
+    "--profile-name",
+    help="Name to save the session profile as (defaults to origin slug)",
+)
+@click.pass_context
+def login(ctx: click.Context, url: str, profile_name: Optional[str]) -> None:
+    """Open a headed browser to log in to a site and save the session as a profile."""
+    import asyncio
+    from .webmcp import WebMCPBridge
+
+    async def run():
+        slug = profile_name or url.replace("https://", "").replace("http://", "").replace(".", "_")
+
+        async with WebMCPBridge(headless=True, origins_allowlist=[url]) as webmcp_bridge:
+            if not webmcp_bridge.browser.browser:
+                await webmcp_bridge.browser.initialize()
+
+            click.echo(f"🔓 Opening headed browser for login to {url}...")
+            click.echo("📝 Log in manually; you have up to 5 minutes.")
+
+            ok = await webmcp_bridge.session_manager.create_profile(
+                slug, webmcp_bridge.browser, url, headed=True
+            )
+
+            if ok:
+                click.echo(f"✅ Session profile saved as '{slug}'")
+            else:
+                click.echo("❌ Failed to save session profile", err=True)
+                raise SystemExit(1)
+
+    asyncio.run(run())
+
+
+@webmcp.command()
+@click.pass_context
+def doctor(ctx: click.Context) -> None:
+    """Check environment readiness for the WebMCP bridge (Chrome version, dependencies)."""
+    import asyncio
+
+    click.echo("🩺 MCPFlow WebMCP doctor")
+
+    try:
+        import playwright  # noqa: F401
+
+        click.echo("✅ playwright is installed")
+    except ImportError:
+        click.echo(
+            "❌ playwright not installed. Run: pip install mcpflow[webmcp] && playwright install chromium",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    try:
+        import mcp  # noqa: F401
+
+        click.echo("✅ mcp (official MCP SDK) is installed")
+    except ImportError:
+        click.echo("❌ mcp SDK not installed. Run: pip install mcp", err=True)
+        raise SystemExit(1)
+
+    async def check_chrome() -> str:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            version_str = browser.version
+            await browser.close()
+            return version_str
+
+    try:
+        version_str = asyncio.run(check_chrome())
+        major_version = int(version_str.split(".")[0])
+        click.echo(f"📦 Bundled Chromium version: {version_str}")
+        if major_version >= 149:
+            click.echo("✅ Chromium version supports the WebMCP origin trial (149+)")
+        else:
+            click.echo(
+                f"⚠️  Chromium {major_version} is older than 149; WebMCP origin-trial pages "
+                "may not expose navigator.modelContext. Run: playwright install chromium",
+                err=True,
+            )
+    except Exception as e:
+        click.echo(f"❌ Could not launch Chromium to check version: {e}", err=True)
+        click.echo("   Run: playwright install chromium", err=True)
+        raise SystemExit(1)
+
+    click.echo("\n✅ Environment looks ready for the WebMCP bridge")
 
 
 @mcpflow_cli.command()

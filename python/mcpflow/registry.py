@@ -86,6 +86,7 @@ class MCPRegistry:
     def __init__(self):
         """Initialize the MCP registry."""
         self._bridges: Dict[str, MCPHTTPBridge] = {}
+        self._webmcp_bridges: Dict[str, Any] = {}  # origin_slug -> WebMCPBridge
         self._tools_cache: Dict[str, List[ToolDefinition]] = {}
         self._mcp_configs: Dict[str, MCPConfig] = {}
 
@@ -128,6 +129,56 @@ class MCPRegistry:
 
         return tools
 
+    async def register_webmcp(
+        self, bridge: Any, url: str, origin_slug: Optional[str] = None
+    ) -> List[ToolDefinition]:
+        """Register a WebMCPBridge and discover its tools.
+
+        Makes WebMCP tools discovered on a live page first-class registry
+        entries alongside server MCPs, so `call_tool`/`get_tools` work the
+        same way regardless of whether a tool came from a server MCP or a
+        WebMCP-enabled page.
+
+        Args:
+            bridge: A `mcpflow.webmcp.WebMCPBridge` instance (already
+                constructed by the caller, e.g. with its own origins
+                allowlist / interceptor / session profile)
+            url: Full URL to discover WebMCP tools on
+            origin_slug: Short origin identifier; defaults to the domain
+                parsed from `url`
+
+        Returns:
+            List of discovered tools, translated to ToolDefinition
+
+        Raises:
+            ValueError: If discovery fails or the origin isn't allowed by
+                the bridge's own origin allowlist
+        """
+        from urllib.parse import urlparse
+
+        if not origin_slug:
+            parsed = urlparse(url)
+            origin_slug = parsed.netloc.replace("www.", "").replace(".", "_")
+
+        manifest = await bridge.discover(url, origin_slug=origin_slug)
+        if manifest is None:
+            raise ValueError(f"WebMCP discovery failed or origin not allowed: {url}")
+
+        mcp_tools = bridge.get_mcp_tools(origin_slug)
+        tools = [
+            ToolDefinition(
+                name=t["name"],
+                description=t.get("description", ""),
+                input_schema=t.get("inputSchema", {}),
+            )
+            for t in mcp_tools
+        ]
+
+        self._webmcp_bridges[origin_slug] = bridge
+        self._tools_cache[origin_slug] = tools
+
+        return tools
+
     def get_tools(self, mcp_name: Optional[str] = None) -> List[ToolDefinition]:
         """Get tools from registry.
 
@@ -160,9 +211,16 @@ class MCPRegistry:
             Tool execution result
 
         Raises:
-            ValueError: If MCP or tool not found
+            ValueError: If MCP or tool not found, or the WebMCP tool call fails
             httpx.HTTPError: If the call fails
         """
+        if mcp_name in self._webmcp_bridges:
+            webmcp_bridge = self._webmcp_bridges[mcp_name]
+            result = await webmcp_bridge.call_tool(mcp_name, tool_name, inputs)
+            if not result.success:
+                raise ValueError(f"WebMCP tool call failed: {result.error}")
+            return {"success": result.success, "result": result.result, "error": result.error}
+
         if mcp_name not in self._bridges:
             raise ValueError(f"MCP '{mcp_name}' not found in registry")
 
@@ -185,9 +243,9 @@ class MCPRegistry:
         """Get list of registered MCP names.
 
         Returns:
-            List of MCP server names
+            List of MCP server names, including registered WebMCP origins
         """
-        return list(self._bridges.keys())
+        return list(self._bridges.keys()) + list(self._webmcp_bridges.keys())
 
     def get_mcp_config(self, mcp_name: str) -> Optional[MCPConfig]:
         """Get the configuration for an MCP server.
@@ -208,8 +266,11 @@ class MCPRegistry:
         """
         for bridge in self._bridges.values():
             await bridge.close()
+        for webmcp_bridge in self._webmcp_bridges.values():
+            await webmcp_bridge.close()
 
         self._bridges.clear()
+        self._webmcp_bridges.clear()
         self._tools_cache.clear()
         self._mcp_configs.clear()
 
